@@ -3,20 +3,32 @@ Mark Boddington <mark.boddington@nignx.com>
 :description: Guide to migrate from CNCF ingress-nginx to NGINX Inc kubernetes-ingress
 :doctype: article
 :url-repo: https://github.com/TuxInvader/nginx-plus-migration
-:toc:
+:toc: preamble
 
-[abstract]
-== Abstract
-This document describes all of the alternative options for the community ingress controller annotations. 
+.Abstract
+There are two primary NGINX based Ingress Controllers available for the Kubernetes platform. One is built and managed by the CNCF community, which we'll refer to as "Community Ingress" (https://github.com/kubernetes/ingress-nginx[ingress-nginx]) and the other is built and maintained by NGINX, which we'll refer to as "NGINX Ingress Controller" or NIC  (https://github.com/nginxinc/kubernetes-ingress[kubernetes-ingress]).
 
-It should be a useful resource for anyone interesting in migrating from community ingress  https://github.com/kubernetes/ingress-nginx[ingress-nginx] to the NGINX Plus Ingress Controller https://github.com/nginxinc/kubernetes-ingress[kubernetes-ingress].
+This document attempts to describe each of the Community Ingress controller annotations, and provide the best alternative option for use with NGINX Ingress Controller (NIC).
 
+It should be a useful resource for anyone interesting in migrating from Community Ingress to the NGINX Plus Ingress Controller.
+
+I also recommend that you read this great post about migrating on the https://www.nginx.com/blog/migrating-from-community-ingress-controller-to-f5-nginx-ingress-controller/[NGINX blog], and download our free ebook https://www.nginx.com/resources/library/managing-kubernetes-traffic-with-f5-nginx-practical-guide[Managing Kubernetes Traffic with F5 NGINX]. Both provide a lot of help and useful guidance.
+
+[IMPORTANT]
+.Ingress vs CRDs
+NGINX Ingress Controller (NIC) supports standard Ingress resources with annotations, and also advanced Custom Resources. We highly recommend that you adopt the CRs because they offer better features and are fully validated by the K8s API. Ingress annotations are KVP metadata, prone to error, and fail slow.
 
 == Advantages of NGINX Plus Ingress
+
 * commercial support
 * NGINX App Protect (Web Application Firewall)
 * NAP-DoS (AI/ML Application DoS protection)
 * Advanced Load Balancing capabilities through CRDs
+
+== Configuration notes
+
+=== snippets
+Many of the configurations outlined below require the use of code snippets: `http-snippets`, `server-snippets` or `location-snippets`. You will need to add the `-enable-snippets` option to the NIC deployment otherwise Ingress/CRDs will be rejected.
 
 == Annotations
 
@@ -300,7 +312,7 @@ h|Ingress | nginx.org/location-snippets
     kind: ConfigMap
     apiVersion: v1
     metadata:
-      name: nginx-egress-config
+      name: nginx-config
       namespace: nginx-ingress
     data:
       http-snippets: \|
@@ -362,15 +374,131 @@ TODO - See <<auth-url>>
 
 === backend-protocol
 
+NGINX Plus Ingress Controller can be used to load balance HTTP(S) and GRPC(S) upstreams. It does not support using an upstream through AJP or FastCGI protocols.
+
+[TIP]
+Instead of using AJP or FastCGI from NGINX, use https://unit.nginx.org[NGINX Unit] as your application server and execute all of your different languages on a common platform. You can then front Unit with NGINX Plus Ingress Controller.
+
+If you *really need* NGINX to load balance FastCGI, then you may be able to build your own configuration and deploy NGINX as a normal workload.
+
+==== HTTP Backend
+
+This is the default, no additional configuration is necessary
+
+==== HTTPS Backend
+
+|===
+h|Annotation| nginx.ingress.kubernetes.io/backend-protocol
+h|Details| Sets the backend protocol to use with the upstreams (HTTP, HTTPS, GRPC, GRPCS, AJP, FCGI). 
+h|Ingress | nginx.org/ssl-services
+2+l|
+    nginx.org/ssl-services: "tea-svc"
+h|CRD| upstreams.*.tls.enable
+2+l|
+    upstreams:
+      - name tea-svc
+        tls:
+          enable: true
+        ...
+|===
+
+==== GRPC Backends
+
 [cols="1,3"]
 |===
 h|Annotation| nginx.ingress.kubernetes.io/backend-protocol
-h|Details| Sets the backend protocol to use with the upstreams (HTTP, HTTPS, GRPC, GRPCS, AJP, FCGI)
-h|Ingress |
+h|Details| Sets the backend protocol to use with the upstreams (HTTP, HTTPS, GRPC, GRPCS, AJP, FCGI). 
+h|Ingress | nginx.org/grpc-services
 2+l|
+    nginx.org/grpc-services: "tea-svc"
+h|CRD| upstreams.*.type
+2+l|
+    upstreams:
+      - name: tea-svc
+        type: grpc
+|===
+
+==== GRPCS Backends
+
+This is a combination of the HTTPS and GRPC options
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/backend-protocol
+h|Details| Sets the backend protocol to use with the upstreams (HTTP, HTTPS, GRPC, GRPCS, AJP, FCGI). 
+h|Ingress | nginx.org/grpc-services *and* nginx.org/ssl-services
+2+l|
+    nginx.org/grpc-services: "tea-svc"
+    nginx.org/ssl-services: "tea-svc"
+h|CRD| upstreams.*.[type\|tls]
+2+l|
+    upstreams:
+      - name: tea-svc
+        type: grpc
+        tls:
+          enable: true
+|===
+
+
+[TIP]
+When dealing with GRPC services, your clients will likely expect to connect to the service using HTTP2, so you should enable `http2` in the NGINX `ConfigMap` and configure TLS termination on the Ingress/CRD
+
+=== canary
+
+The community ingress controller has a number of annotations which control routing traffic to a canary version of the application.
+
+[TIP]
+I'll cover a few examples here, but there is a comprehensive guide available in ebook form: https://www.nginx.com/resources/library/managing-kubernetes-traffic-with-f5-nginx-practical-guide[Managing Kubernetes Traffic with F5 NGINX]
+
+==== canary-by-header
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/canary-by-header
+h|Example| nginx.ingress.kubernetes.io/canary-by-header: my-header
+h|Details| Enables routing to the canary when the named header is present and has a value of `always` or `never`
+h|Ingress | nginx.org/server-snippets
+2+l|
+    nginx.org/server-snippets: \|
+      location /canary {
+        internal;
+        proxy_pass http://app-canary-svc.namespace/
+      }
+    nginx.org/location-snippets: \|
+      if ( $access_canary = 1 ) {
+        rewrite ^(.*)$ /canary/$1
+      }
+2+l| 
+    kind: ConfigMap
+    apiVersion: v1
+    metadata:
+      name: nginx-config
+      namespace: nginx-ingress
+    data:
+      http-snippets: \|
+        map $http_my_header $access_canary {
+          default          0;
+          never            0;
+          always           1;
+        }
 h|CRD|
 2+l|
 |===
+
+If you are using the Ingress with snippets along with NGINX Service Mesh (NSM), you will need to enable mTLS on the canary location like so:
+
+----
+	location /canary {
+	  internal;
+	  proxy_ssl_certificate /etc/nginx/secrets/spiffe_cert.pem;
+	  proxy_ssl_certificate_key /etc/nginx/secrets/spiffe_key.pem;
+	  proxy_ssl_trusted_certificate /etc/nginx/secrets/spiffe_rootca.pem;
+	  proxy_ssl_server_name on;
+	  proxy_ssl_verify on;
+	  proxy_ssl_verify_depth 25;
+	  proxy_ssl_name app-canary-svc.namespace.svc;
+	  proxy_pass https://app-canary-svc.namespace:80/;
+	}
+----
+
 
 ## template
 
