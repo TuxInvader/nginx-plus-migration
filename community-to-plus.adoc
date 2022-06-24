@@ -1,0 +1,385 @@
+= Community Ingress Migration
+Mark Boddington <mark.boddington@nignx.com>
+:description: Guide to migrate from CNCF ingress-nginx to NGINX Inc kubernetes-ingress
+:doctype: article
+:url-repo: https://github.com/TuxInvader/nginx-plus-migration
+:toc:
+
+[abstract]
+== Abstract
+This document describes all of the alternative options for the community ingress controller annotations. 
+
+It should be a useful resource for anyone interesting in migrating from community ingress  https://github.com/kubernetes/ingress-nginx[ingress-nginx] to the NGINX Plus Ingress Controller https://github.com/nginxinc/kubernetes-ingress[kubernetes-ingress].
+
+
+== Advantages of NGINX Plus Ingress
+* commercial support
+* NGINX App Protect (Web Application Firewall)
+* NAP-DoS (AI/ML Application DoS protection)
+* Advanced Load Balancing capabilities through CRDs
+
+== Annotations
+
+=== app-root
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/app-root
+h|Details| Creates a redirect for the root url (/) to the given path.
+h|Ingress | nginx.org/server-snippets
+2+l| 
+    nginx.org/server-snippets: \|
+      location / {
+        return 302 /coffee;
+      }
+h|CRD| routes.*.action.redirect
+2+l|
+    routes:
+    - path: /
+      action:
+        redirect:
+          url: ${host}/coffee
+          code: 301
+|===
+
+=== affinity
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/affinity
+h|Details| Enables cookie based session persistence
+h|Ingress | nginx.com/sticky-cookie-services: "service1[;service2;...]"
+2+l|
+    nginx.com/sticky-cookie-services: "serviceName=coffee-svc cookieName expires=1h httponly secure path=/coffee
+h|CRD| upstream.SessionCookie
+2+l|
+    upstreams:
+    - name: tea
+      service: tea-svc
+      port: 80
+      sessionCookie:
+        enable: true
+        name: srv_id
+        path: /
+        expires: 1h
+        domain: .example.com
+        httpOnly: false
+        secure: true
+|===
+
+For more information see: https://github.com/nginxinc/kubernetes-ingress/tree/v2.2.2/examples/session-persistence
+
+=== affinity-mode
+
+There is no equivalent in the NGINX Ingress, the behavior of NGINX is to always persist the client to the upstream while it is available. This is the same as the "persistent" mode in community.
+
+=== affinity-canary-behavior
+
+There is no equivalent in the NGINX Ingress, the behavior of NGINX is to always persist the client to the upstream while it is available. This is the same as the "sticky" mode in community.
+
+=== auth-realm
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/auth-realm
+h|Details| This is one of several annotations which can be used together to enable basic or digest authentication
+h|Ingress | nginx.org/server-snippets *or* nginx.org/location-snippets
+2+l|
+    nginx.org/server-snippets: \|
+      auth_basic_user_file /etc/nginx/htpasswd/basic-auth;
+      auth_basic "Secure Site";
+h|CRD| server-snippets *or* routes.*.location-snippets
+2+l|
+    spec:
+      server-snippets: \|
+        auth_basic_user_file /etc/nginx/htpasswd/basic-auth;
+        auth_basic "Secure Site";
+|===
+
+The above example also requires that the htpasswd file be mounted into the Ingress Controller as a volume. You can create load the htpasswd file in as a secret using `kubectl` eg:
+
+----
+kubectl -n nginx-ingress create secret generic basic-auth --from-file=basic-auth
+----
+
+You will then need to make adjustments to your Ingress Controller deployment to mount the basic-auth secret, similar to this:
+
+----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-ingress
+  namespace: nginx-ingress
+spec:
+  replicas: 1
+  ...
+  template:
+    metadata:
+      ...
+    spec:
+      volumes:
+        - name: basic-auth
+          secret:
+            secretName: basic-auth
+            optional: false
+      ...
+      containers:
+        - name: nginx-ingress
+          ...
+          volumeMounts:
+            - name: basic-auth
+              mountPath: /etc/nginx/htpasswd
+              readOnly: true
+----
+
+=== auth-secret
+
+This annotation references the secret which contains the htpasswd information for basic-auth. With NGINX Ingress, any secrets need to be mounted into the Ingress Controller deployment as volumes. See the <<auth-realm>> section above for details.
+
+=== auth-secret-type
+
+The secret mounted into the NGINX Ingress should be a standard htpasswd file. See <<auth-realm>> for how to mount this secret into the Ingress Controller pods.
+
+=== auth-type
+
+The only auth-type supported is `basic`, we do not have an equivalent annotation. See <<auth-realm>> for a description of how to do basic auth with NGINX Ingress.
+
+=== auth-tls-secret
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/auth-tls-secret
+h|Details| This is one of several annotations to enable client certificate authentication
+h|Ingress | nginx.org/server-snippets
+2+l|
+    nginx.org/server-snippets: \|
+      ssl_client_certificate   /etc/nginx/mtls/ca.crt;
+      ssl_verify_client        on;
+      ssl_verify_depth         2;
+      error_page               495 496 = 301 http://foo.bar/cert-fail;
+h|CRD| VS Policy: IngressMTLS
+2+l|
+    apiVersion: k8s.nginx.org/v1
+    kind: Policy
+    metadata:
+      name: client-mtls
+    spec:
+      ingressMTLS:
+        clientCertSecret: ingress-client-ca
+        verifyClient: "on"
+        verifyDepth: 2
+2+l|
+    apiVersion: k8s.nginx.org/v1
+    kind: VirtualServer
+    metadata:
+      name: cafe
+    spec:
+      policies:
+      - name: client-mtls
+|===
+
+If using the CRD, you can create the policy resource and then apply it to the VirtualServer resource under spec.policies as shown above.
+
+If you are using an Ingress resource and annotation, then you will need to ensure that you mount the CA certificate into the Ingress Controller using a volume mount. eg:
+
+----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-ingress
+  namespace: nginx-ingress
+spec:
+  replicas: 1
+  ...
+  template:
+    metadata:
+      ...
+    spec:
+      volumes:
+        - name: ingress-client-ca
+        secret:
+          secretName: ingress-client-ca
+          items:
+            - key: ca.crt
+              path: ca.crt
+      ...
+      containers:
+        - name: nginx-ingress
+          ...
+          volumeMounts:
+            - mountPath: /etc/nginx/mtls
+              name: ingress-client-ca
+              readOnly: true
+
+----
+
+=== auth-tls-verify-depth
+
+The number of certificates to check when trying to find the chain-of-trust between the provided CA certificate and the client. This is provided in the `server-snippet` or `policy` see <<auth-tls-secret>> above
+
+=== auth-tls-verify-client
+
+This is passed as an option to `ssl_verify_client` in the snippet or `verifyClient` in the CRD Policy. The possible values are: `on`, `off`, `optional`, `optional_no_ca`. See <<auth-tls-secret>> above.
+
+=== auth-tls-error-page
+
+This is not supported on the CRD `Policy`, but can enabled with `errorPages` on the `VirtualServer` CRD. It can also be enabled with `server-snippets` in the Ingress resource.
+
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/auth-tls-error-page
+h|Details| Returns a redirect in the event the client certificate authentication fails
+h|Ingress | nginx.org/server-snippets
+2+l|
+    nginx.org/server-snippets: \|
+      error_page    495 496 = 301 http://foo.bar/cert-fail;
+h|CRD| errorPages on path, or server-snippets
+2+l|
+    path: /
+    errorPages:
+    - codes: [495, 496]
+      redirect:
+        code: 301
+        url: http://foo.bar/cert-fail
+2+l|
+    spec:
+      server-snippets: \|
+        error_page    495 496 = 301 http://foo.bar/cert-fail;
+|===
+
+See the <<auth-tls-secret>> section for the full mTLS example.
+
+=== auth-tls-pass-certificate-to-upstream
+
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/auth-tls-pass-certificate-to-upstream
+h|Details| When client cert auth is in use, this boolean enables passing the client cert information to the upstream in the header ssl-client-cert
+h|Ingress | nginx.org/server-snippets
+2+l|
+    nginx.org/server-snippets: \|
+      proxy_set_header ssl_client_cert $ssl_client_raw_cert;
+      proxy_set_header ssl-client-issuer-dn $ssl_client_i_dn;
+      proxy_set_header ssl-client-subject-dn $ssl_client_s_dn;
+      proxy_set_header ssl-client-verify $ssl_client_verify;
+h|CRD| action.proxy.requestHeaders
+2+l|
+    action:
+      proxy:
+        upstream: webapp
+        requestHeaders:
+          set:
+          - name: ssl-client-subject-dn
+            value: ${ssl_client_s_dn}
+          - name: ssl-client-issuer-dn
+            value: ${ssl_client_i_dn}
+          - name: ssl_client_cert
+            value: ${ssl_client_raw_cert}
+          - name: ssl_client_verify
+            value: ${ssl_client_verify}
+|===
+
+In the snippet above we sent the raw PEM cert, but you can send any of the client cert variables which NGINX creates in the http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_client_certificate[ngx_http_ssl_module].
+
+The example also sets the other headers which community ingress sends by default: `ssl-client-issuer-dn`, `ssl-client-subject-dn` and `ssl-client-verify`. 
+
+[TIP]
+Since NGINX version 1.11.7 - the FAILED result in `ssl_client_verify` changed to `FAILED:reason`
+
+=== auth-tls-match-cn
+
+There is no equivalent for Ingress resources, but we can use a location-snippet on the resource to set a condition based on a variable, and then set that variable with a map in the NGINX ConfigMap.
+
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/auth-tls-match-cn
+h|Details| Enables a comparison between the subject dn of the client cert and a provided regex
+h|Ingress | nginx.org/location-snippets
+2+l|
+    nginx.org/location-snippets: \|
+      if ( $access_allowed = 0 ) {
+        return 403 "403 Access Forbidden:\n";
+      }
+2+l| 
+    kind: ConfigMap
+    apiVersion: v1
+    metadata:
+      name: nginx-egress-config
+      namespace: nginx-ingress
+    data:
+      http-snippets: \|
+        map $ssl_client_s_dn $access_allowed {
+          default          0;
+          CN=foo.bar       1;
+          ~*CN=.*\.my.org  1;
+        }
+h|CRD| matches.condition.variable
+2+l|
+    path: /coffee
+    matches:
+    - conditions:
+      - variable: $ssl_client_s_dn
+        value: "CN=foo.bar"
+      - variable: $ssl_client_s_dn
+        value: "~*CN=.*\.my.org"
+      action:
+        pass: coffee-post
+    action:
+      pass: coffee
+|===
+
+=== auth-url
+
+TODO - Determine if this uses the `auth_http` directive and provide example if so.
+
+=== auth-cache-key
+
+TODO - See <<auth-url>>
+
+=== auth-cache-duration
+
+TODO - See <<auth-url>>
+
+=== auth-keepalive
+
+TODO - See <<auth-url>>
+
+=== auth-keepalive-requests
+
+TODO - See <<auth-url>>
+
+=== auth-keepalive-timeout
+
+TODO - See <<auth-url>>
+
+=== auth-proxy-set-headers
+
+TODO - See <<auth-url>>
+
+=== auth-snippet
+
+TODO - See <<auth-url>>
+
+=== enable-global-auth
+
+TODO - See <<auth-url>>
+
+=== backend-protocol
+
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/backend-protocol
+h|Details| Sets the backend protocol to use with the upstreams (HTTP, HTTPS, GRPC, GRPCS, AJP, FCGI)
+h|Ingress |
+2+l|
+h|CRD|
+2+l|
+|===
+
+## template
+
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/
+h|Details|
+h|Ingress |
+2+l|
+h|CRD|
+2+l|
+|===
