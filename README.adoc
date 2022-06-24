@@ -6,3 +6,6 @@ This document describes all of the alternative options for the community ingress
 
 It should be a useful resource for anyone interesting in migrating from community ingress  https://github.com/kubernetes/ingress-nginx[ingress-nginx] to the NGINX Plus Ingress Controller https://github.com/nginxinc/kubernetes-ingress[kubernetes-ingress].
 
+link:community-to-plus[Read the Guide]
+
+:wq
