@@ -321,7 +321,7 @@ h|Ingress | nginx.org/location-snippets
           CN=foo.bar       1;
           ~*CN=.*\.my.org  1;
         }
-h|CRD| matches.condition.variable
+h|CRD| matches.conditions.variable
 2+l|
     path: /coffee
     matches:
@@ -449,7 +449,65 @@ The community ingress controller has a number of annotations which control routi
 [TIP]
 I'll cover a few examples here, but there is a comprehensive guide available in ebook form: https://www.nginx.com/resources/library/managing-kubernetes-traffic-with-f5-nginx-practical-guide[Managing Kubernetes Traffic with F5 NGINX]
 
-==== canary-by-header
+The best way to support canary deployments is by using the `VirtualServer` or `VirtualServerRoute` custom resources, creating a canary deployment on `Ingress` requires snippets and a ConfigMap.
+
+==== Full canary Ingress example
+
+In the example below we create a dummy path `/__canary_service__` which we route to the canary service. This causes the NIC to generate an upstream block, which we can then reference in the server-snippet. 
+
+The Ingress controller builds upstream blocks using the naming format: `<namespace>-<ingress-name>-<hostname>-<service-name>-<port>`. 
+
+We're using `set` in the snippet to configure the name and port of the service, which are then used in the `proxy_pass`.
+
+----
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myapp-ingress
+  namespace: demo
+  annotations:
+    nginx.org/server-snippets: |
+      location ~ ^/canary(.*)$ {
+        internal;
+        set $service myapp-canary;
+        set $service_port 80;
+        proxy_set_header Host $host;
+        proxy_pass https://${resource_namespace}-${resource_name}-${host}-${service}-${service_port}$1;
+      }
+    nginx.org/location-snippets: |
+      if ( $access_canary = 1 ) {
+        rewrite ^(.*)$ /canary/$1 last;
+      }
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+      - www.myapp.demo
+    secretName: myapp-cert
+  rules:
+  - host: "www.myapp.demo"
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: myapp
+            port:
+              number: 80
+      - path: /__canary_service__
+        pathType: Exact
+        backend:
+          service:
+            name: myapp-canary
+            port:
+              number: 80
+----
+
+
+
+=== canary-by-header
 [cols="1,3"]
 |===
 h|Annotation| nginx.ingress.kubernetes.io/canary-by-header
@@ -460,11 +518,11 @@ h|Ingress | nginx.org/server-snippets
     nginx.org/server-snippets: \|
       location /canary {
         internal;
-        proxy_pass http://app-canary-svc.namespace/
+        proxy_pass http://myapp-canary.namespace.svc/
       }
     nginx.org/location-snippets: \|
       if ( $access_canary = 1 ) {
-        rewrite ^(.*)$ /canary/$1
+        rewrite ^(.*)$ /canary/$1 last;
       }
 2+l| 
     kind: ConfigMap
@@ -479,11 +537,27 @@ h|Ingress | nginx.org/server-snippets
           never            0;
           always           1;
         }
-h|CRD|
+h|CRD| matches.conditions.header
 2+l|
+    path: /coffee
+    matches:
+    - conditions:
+      - header: my-header
+        value: never
+      action:
+        pass: app-svc
+    - conditions:
+      - header: my-header
+        value: always
+      action:
+        pass: app-canary-svc
+    action:
+      pass:  app-svc
 |===
 
-If you are using the Ingress with snippets along with NGINX Service Mesh (NSM), you will need to enable mTLS on the canary location like so:
+[#canary-with-ingress-nsm-warning]
+[WARNING]
+If you use the Ingress examples with snippets together with NGINX Service Mesh (NSM), you will need to enable mTLS on the canary location. So, extend the server-snippet to include proxy_ssl_* options:
 
 ----
 	location /canary {
@@ -498,6 +572,82 @@ If you are using the Ingress with snippets along with NGINX Service Mesh (NSM), 
 	  proxy_pass https://app-canary-svc.namespace:80/;
 	}
 ----
+
+=== canary-by-header-value
+
+This is essentially the same as the <<canary-by-header>> example above, but you can set your own header values instead of using `always` and `never`.
+
+=== canary-by-header-pattern
+
+This is essentially the same as the <<canary-by-header>> example above except we use a regex pattern rather than an explicit value. NGINX treats strings as Perl Compatable RegEx (PCRE) when they start with `~` for cases-sensitive and `~*` for case-insensitive patterns.
+
+=== canary-by-cookie
+
+This is very similar to routing by header, but we use a named cookie instead. Therefore the <<canary-by-header>> example is modified slightly to become:
+
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/canary-by-cookie
+h|Example| nginx.ingress.kubernetes.io/canary-by-cookie: canary
+h|Details| Enables routing to the canary when the named cookie is present and has a value of `always` or `never`
+h|Ingress | nginx.org/server-snippets
+2+l|
+    nginx.org/server-snippets: \|
+      location /canary {
+        internal;
+        proxy_pass http://app-canary-svc.namespace/
+      }
+    nginx.org/location-snippets: \|
+      if ( $access_canary = 1 ) {
+        rewrite ^(.*)$ /canary/$1 last;
+      }
+2+l| 
+    kind: ConfigMap
+    apiVersion: v1
+    metadata:
+      name: nginx-config
+      namespace: nginx-ingress
+    data:
+      http-snippets: \|
+        map $cookie_canary $access_canary {
+          default          0;
+          never            0;
+          always           1;
+        }
+h|CRD| matches.conditions.cookie
+2+l|
+    path: /coffee
+    matches:
+    - conditions:
+      - cookie: canary
+        value: never
+      action:
+        pass: app-svc
+    - conditions:
+      - cookie: canary
+        value: always
+      action:
+        pass: app-canary-svc
+    action:
+      pass:  app-svc
+|===
+
+If you're using the Ingress resource and NGINX Service Mesh, then you require additional configuration. See <<canary-with-ingress-nsm-warning>>
+
+=== canary-weight
+
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/canary-weight
+h|Details| The percentage of random requests to send to the canary deployment
+h|Ingress | 
+2+l|
+h|CRD|
+2+l|
+|===
+
+=== canary-weight-total
+
 
 
 ## template
