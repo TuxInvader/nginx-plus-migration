@@ -449,63 +449,31 @@ The community ingress controller has a number of annotations which control routi
 [TIP]
 I'll cover a few examples here, but there is a comprehensive guide available in ebook form: https://www.nginx.com/resources/library/managing-kubernetes-traffic-with-f5-nginx-practical-guide[Managing Kubernetes Traffic with F5 NGINX]
 
-The best way to support canary deployments is by using the `VirtualServer` or `VirtualServerRoute` custom resources, creating a canary deployment on `Ingress` requires snippets and a ConfigMap.
+The best way to support canary deployments is by using the `VirtualServer` or `VirtualServerRoute` custom resources. They support all of these use-cases out of the box and are easy to use.
 
-==== Full canary Ingress example
-
-In the example below we create a dummy path `/__canary_service__` which we route to the canary service. This causes the NIC to generate an upstream block, which we can then reference in the server-snippet. 
-
-The Ingress controller builds upstream blocks using the naming format: `<namespace>-<ingress-name>-<hostname>-<service-name>-<port>`. 
-
-We're using `set` in the snippet to configure the name and port of the service, which are then used in the `proxy_pass`.
+Creating a canary deployment with `Ingress` requires server-snippets, a ConfigMap, and a dummy location in the Ingress resource. Eg:
 
 ----
----
 apiVersion: networking.k8s.io/v1
 kind: Ingress
-metadata:
-  name: myapp-ingress
-  namespace: demo
-  annotations:
-    nginx.org/server-snippets: |
-      location ~ ^/canary(.*)$ {
-        internal;
-        set $service myapp-canary;
-        set $service_port 80;
-        proxy_set_header Host $host;
-        proxy_pass https://${resource_namespace}-${resource_name}-${host}-${service}-${service_port}$1;
-      }
-    nginx.org/location-snippets: |
-      if ( $access_canary = 1 ) {
-        rewrite ^(.*)$ /canary/$1 last;
-      }
-spec:
-  ingressClassName: nginx
-  tls:
-  - hosts:
-      - www.myapp.demo
-    secretName: myapp-cert
-  rules:
-  - host: "www.myapp.demo"
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: myapp
-            port:
-              number: 80
-      - path: /__canary_service__
-        pathType: Exact
-        backend:
-          service:
-            name: myapp-canary
-            port:
-              number: 80
+  ...
+    - path: /
+      pathType: Prefix
+      backend:
+        service:
+          name: myapp
+          port:
+            number: 80
+    - path: /__canary_service__
+      pathType: Exact
+      backend:
+        service:
+          name: myapp-canary
+          port:
+            number: 80
 ----
 
-
+There's a <<Full Canary Ingress example>> at the end of this document.
 
 === canary-by-header
 [cols="1,3"]
@@ -518,7 +486,8 @@ h|Ingress | nginx.org/server-snippets
     nginx.org/server-snippets: \|
       location /canary {
         internal;
-        proxy_pass http://myapp-canary.namespace.svc/
+        set $service <canary-service>;
+        proxy_pass http://<ns>-<ingress>-<hostname>-<service>-<port>/
       }
     nginx.org/location-snippets: \|
       if ( $access_canary = 1 ) {
@@ -595,7 +564,8 @@ h|Ingress | nginx.org/server-snippets
     nginx.org/server-snippets: \|
       location /canary {
         internal;
-        proxy_pass http://app-canary-svc.namespace/
+        set $service <canary-service>;
+        proxy_pass http://<ns>-<ingress>-<hostname>-<service>-<port>/
       }
     nginx.org/location-snippets: \|
       if ( $access_canary = 1 ) {
@@ -636,19 +606,161 @@ If you're using the Ingress resource and NGINX Service Mesh, then you require ad
 
 === canary-weight
 
+Custom Resources support weight based Canary out of the box, but with Ingress we need to use ConfigMaps and snippets again. In this case, we replace the map in the ConfigMap with a split_clients directive.
+
+The split_clients module takes a variable for context, this ensures that the same context is persisted to the main application or the canary. In the snippet below we set the `$split_var` variable to `$request_id` for complete randomness, but you could use the X-Forwarded-For or a cookie value if you want consistency.
+
+[TIP]
+The CRDs also use `$request_id` as the context for client splitting
+
 [cols="1,3"]
 |===
 h|Annotation| nginx.ingress.kubernetes.io/canary-weight
 h|Details| The percentage of random requests to send to the canary deployment
-h|Ingress | 
+h|Ingress | nginx.org/server-snippets
 2+l|
-h|CRD|
+    nginx.org/server-snippets: \|
+      set $split_var $request_id;
+      location /canary {
+        internal;
+        set $service <canary-service>;
+        proxy_pass http://<ns>-<ingress>-<hostname>-<service>-<port>/
+      }
+    nginx.org/location-snippets: \|
+      if ( $access_canary = 1 ) {
+        rewrite ^(.*)$ /canary/$1 last;
+      }
+2+l| 
+    kind: ConfigMap
+    apiVersion: v1
+    metadata:
+      name: nginx-config
+      namespace: nginx-ingress
+    data:
+      http-snippets: \|
+        split_clients $split_var $access_canary {
+          10%              1;
+          *                0;
+        }
+h|CRD| routes.*.splits
 2+l|
+  spec:
+    ...
+    routes:
+      splits:
+      - weight: 10
+        action:
+          pass myapp-canary
+      - weight: 90
+        action:
+          pass: myapp
 |===
 
 === canary-weight-total
 
+There is no equivalent on NGINX Ingress Controller. Please ensure that the weighting is a percentage.
 
+=== client-body-buffer-size
+
+NGINX NIC supports modifying the some low level settings of NGINX, but not this one. The directive set by this annotation is `client_body_buffer_size` and can be set through a snippet
+
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/client-body-buffer-size
+h|Details| Set the client_body_buffer_size tunable on NGINX
+h|Ingress | nginx.org/server-snippets
+2+l|
+  nginx.org/server-snippets: \|
+    client-body-buffer-size   100k;
+h|CRD| spec.server-snippets
+2+l|
+  spec:
+    server-snippets: \|
+      client-body-buffer-size   100k;
+|===
+
+=== configuration-snippet
+
+NGINX ConfigMaps, Ingress and Custom Resources support adding NGINX directives into various contexts, this includes: `http-snippets`, `server-snippets`, and `location-snippets` for each of those contexts.
+
+Where possible avoid the use of snippets and make use of built in features for the Custom Resources.
+
+=== custom-http-errors
+
+
+
+== Examples
+
+=== Full Canary Ingress example
+
+In the example below we create a dummy path `/__canary_service__` which we route to the canary service. This causes the NIC to generate an upstream block, which we can then reference in the server-snippet. 
+
+The Ingress controller builds upstream blocks using the naming format: `<namespace>-<ingress-name>-<hostname>-<service-name>-<port>`. 
+
+We're using `set` in the snippet to configure the name and port of the service, which are then used in the `proxy_pass`. Because we're using variables rather than hard-coding the upstream name, we need to use a regex in the location with a capture group.
+
+----
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myapp-ingress
+  namespace: demo
+  annotations:
+    nginx.org/server-snippets: |
+      location ~ ^/canary(.*)$ {
+        internal;
+        set $service myapp-canary;
+        set $service_port 80;
+        proxy_set_header Host $host;
+        proxy_pass https://${resource_namespace}-${resource_name}-${host}-${service}-${service_port}$1;
+      }
+    nginx.org/location-snippets: |
+      if ( $access_canary = 1 ) {
+        rewrite ^(.*)$ /canary/$1 last;
+      }
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+      - www.myapp.demo
+    secretName: myapp-cert
+  rules:
+  - host: "www.myapp.demo"
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: myapp
+            port:
+              number: 80
+      - path: /__canary_service__
+        pathType: Exact
+        backend:
+          service:
+            name: myapp-canary
+            port:
+              number: 80
+----
+
+The above Ingress only works with a NGINX ConfigMap, like this header example:
+
+----
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: nginx-config
+  namespace: nginx-ingress
+data:
+  http-snippets: |
+    map $http_my_header $access_canary {
+      default          0;
+      never            0;
+      always           1;
+    }
+----
 
 ## template
 
