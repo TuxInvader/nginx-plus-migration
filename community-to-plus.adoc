@@ -687,6 +687,39 @@ Where possible avoid the use of snippets and make use of built in features for t
 
 === custom-http-errors
 
+NGINX can return content directly, or issue a redirect to the error page (302 by default).
+
+[cols="1,3"]
+|===
+h|Annotation| nginx.ingress.kubernetes.io/custom-http-errors
+h|Details| Define custom errors to replace errors from upstreams
+h|Ingress | nginx.org/server-snippets
+2+l|
+    nginx.org/server-snippets: \|
+      error_page 403      /403.html;
+      error_page 404      =301 http://default-backend/error404.html;
+h|CRD| routes.*.errorPages
+2+l|
+  path: /coffee
+  errorPages:
+  - codes: [502, 503]
+    redirect:
+      code: 301
+      url: http://default-backend/error5xx.html
+  - codes: [404]
+    return:
+      code: 200
+      body: "Original resource not found, but success!"
+      headers:
+      - name: x-original-code
+        value: ${upstream_status}
+|===
+
+=== default-backend
+
+The default-backend use-case can be met by referencing a remote URI in the <<custom-http-errors>> example above. There is no equivalent annotation.
+
+
 
 
 == Examples
